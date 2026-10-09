@@ -1,0 +1,17 @@
+{
+    "DESIGN_NAME": "MMU",
+    "VERILOG_FILES": [
+        "dir::../rtl/MMU.v",
+        "dir::../rtl/im2col_addr_gen.v",
+        "dir::../rtl/systolic_array.v",
+        "dir::../rtl/MAC.v",
+        "dir::../rtl/channel_bank.v",
+        "dir::../rtl/activation_feeder.v",
+        "dir::../rtl/output_accumulator.v",
+        "dir::../rtl/row_sram.v"
+    ],
+    "CLOCK_PERIOD": 20,
+    "CLOCK_PORT": "clk",
+    "RUN_ANTENNA_REPAIR": true,
+    "RUN_HEURISTIC_DIODE_INSERTION": true
+}
