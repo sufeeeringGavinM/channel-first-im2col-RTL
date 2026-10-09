@@ -313,6 +313,24 @@ it in `summary.json` alongside cycle counts and useful/total PE counts. This is
 measures channel occupancy, not activity over time; loading, pipeline fill/drain,
 and padded input positions do not reduce this percentage.
 
-## Note on AI-use
+## TODO
 
-Codex was used to assist in the creation of this project.
+1. Currently, it is assumed that input tensors and kernel tensors fit in the SRAMs.
+In reality, they probably will not. So a next step is tiling. We'll have to cover:
+    a. the case for when the number of channels exceed the number of PE rows,
+    b. the case for when the number of kernels exceed the number of PE columns,
+    c. the case for when input/output data for an input/output channel don't fit in its SRAM bank,
+    d. the case for when kernels don't fit in the kernel SRAM banks
+    e. proper accumulation across those cases
+3. Other AI accelerator things such as:
+    a. host control interface
+    b. off-chip memory where entire input tensors & kernel tensors live & where final outputs go
+       - need a hardware interface for this as well, a DMA.
+    c. layer chaining
+    d. bias, requantization, nonlinear activation, pooling, etc.
+
+And deciding which of #2 we offload to the host
+
+# Note on AI-use
+
+Codex and GPT-6.1 Sol was used to assist in the creation of this project.
