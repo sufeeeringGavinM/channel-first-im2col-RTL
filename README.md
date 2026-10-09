@@ -312,3 +312,7 @@ it in `summary.json` alongside cycle counts and useful/total PE counts. This is
 `100*C*K/ARRAY_SIZE**2`, the fraction of PEs assigned useful channels. It
 measures channel occupancy, not activity over time; loading, pipeline fill/drain,
 and padded input positions do not reduce this percentage.
+
+## Note on AI-use
+
+Codex was used to assist in the creation of this project.
