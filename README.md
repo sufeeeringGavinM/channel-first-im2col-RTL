@@ -7,9 +7,12 @@ for each tap and accumulates results in SRAM. Each PE
 has two stationary weight registers: one supplies the current tap while the
 other receives the next tap from the kernel SRAM.
 
-## Tensor coordinates and runtime configuration
+## Logical tensor shapes
 
-| Tensor | Shape | Coordinates |
+These shapes describe convolution dimensions and coordinates independently of
+how values are stored in tensor files or SRAM.
+
+| Tensor | Logical shape | Coordinates |
 |---|---|---|
 | Input | `(N,C,H,W)` | `(n,c,h,w)` |
 | Kernel | `(K,C,R,S)` | `(k,c,r,s)` |
@@ -18,6 +21,8 @@ other receives the next tap from the kernel SRAM.
 The core processes `N` images per start, all using the same kernel. Images
 are interleaved within each tap. Logical channel counts satisfy
 `1 <= C,K <= ARRAY_SIZE`; `N` is positive and limited by SRAM capacity.
+
+## Runtime configuration
 
 | Setting | Interface |
 |---|---|
@@ -46,14 +51,27 @@ Dimensions, stride, and dilation are positive; padding is nonnegative. The
 dilated kernel fits within the padded input. Configuration and tensor contents
 must fit the fixed memory capacities. Kernel coordinates use `CFG_WIDTH` bits.
 
-Tensor files contain hexadecimal values with the last coordinate varying
-fastest: input NCHW, kernel KCRS, and output NKPQ. SRAM stores all images of
-one input channel per bank, with image coordinate
-`n` varying fastest. The testbench maps tensor-file coordinates
-into the interleaved SRAM layout.
-For `N=2`, bank `c` starts with input `(n,c,h,w)` coordinates
+## Tensor-file and SRAM storage layouts
+
+| Tensor | Tensor-file order | SRAM bank | Within-bank order | SRAM address |
+|---|---|---|---|---|
+| Input | NCHW | `c` | HWN | `(h*W+w)*N+n` |
+| Kernel | KCRS | `k` | CRS | `(c*R+r)*S+s` |
+| Output | NKPQ | `k` | PQN | `OUT_BASE+(p*Q+q)*N+n` |
+
+In each storage order, the rightmost coordinate varies fastest. Tensor files
+contain hexadecimal values in the logical dimension order. The testbench
+rearranges inputs into the banked SRAM layout and exports outputs in NKPQ order.
+Kernel-file values map to bank `k`, with `(c,r,s)` varying within that bank.
+
+Within each input/output bank, images are interleaved with `n` varying fastest.
+For `N=2`, input bank `c` starts with logical `(n,c,h,w)` coordinates
 `(0,c,0,0)`, `(1,c,0,0)`, `(0,c,0,1)`, `(1,c,0,1)`, and so on.
-Outputs use the same image-minor ordering. Each SRAM word contains one value.
+Outputs use the same image-minor ordering, starting at `OUT_BASE=N*H*W` after
+the input region. Each SRAM word contains one value.
+
+The physical storage has fixed bank counts and depths. The logical tensor
+shapes are runtime values; they determine which banks and addresses are used.
 
 ## Modules
 
@@ -151,11 +169,9 @@ they do not change the physical bank count. Each PE has two `BIT_WIDTH` stationa
 kernel SRAM and the registered weight-forwarding chain.
 These memories are RTL arrays, without instantiated physical SRAM macros.
 
-| Storage | Address | Word width |
-|---|---|---|
-| Inputs in bank `c` | `(h*W+w)*N+n`, starting at zero | `ACC_WIDTH` |
-| Outputs in bank `k` | `OUT_BASE+(p*Q+q)*N+n`, with `OUT_BASE=N*H*W` | `ACC_WIDTH` |
-| Kernel in bank `k` | `(c*R+r)*S+s` | `BIT_WIDTH` |
+Input/output SRAM words are `ACC_WIDTH` bits; kernel SRAM words are
+`BIT_WIDTH` bits. Addresses and tensor-file orders are listed in
+[Tensor-file and SRAM storage layouts](#tensor-file-and-sram-storage-layouts).
 
 Each input/output bank has `2**ADDR_WIDTH` words and must hold `N*(H*W+P*Q)` words.
 Each kernel bank has `2**KERNEL_ADDR_WIDTH` words and must hold `C*R*S` words.
