@@ -350,14 +350,13 @@ And deciding which of #2 we offload to the host
 ## Credits
 
 https://github.com/kaggar11/systolic_4x4arr 
-    - Code was initially based on this. It's pretty
-    much a Ship of Theseus thing now at this point since the only recognizable parts 
-    are the PE and the PE array buses but still worth acknowledging.
+    
+- Code was initially based on this. It's pretty much a Ship of Theseus thing now at this point since the only recognizable parts are the PE and the PE array buses but still worth acknowledging.
 
 "Characterizing and Demystifying the Implicit Convolution Algorithm on Commercial Matrix-Multiplication Accelerators" by
 Zhou et al.
-    - https://doi.org/10.48550/arXiv.2110.03901 
-    - Channel-first implicit im2col algorithm and TPU architecture taken from here.
+- https://doi.org/10.48550/arXiv.2110.03901 
+- Channel-first implicit im2col algorithm and TPU architecture taken from here.
 
 # Note on AI-use
 
