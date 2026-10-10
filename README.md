@@ -112,6 +112,8 @@ The top level owns tap coordinates, run timing, and active weight-buffer selecti
 
 ## Address generation and array operation
 
+### Activation addresses
+
 For tap `(r,s)`, the stream visits all images at each output spatial position.
 The flattened stream position decodes as:
 
@@ -137,6 +139,38 @@ converts it to the interleaved SRAM address. `valid` is true when
 zero. The caller supplies `pix < P*Q`, `r < R`, and `s < S`; the generator
 checks input bounds. Runtime division and remainder by `Q` are part of the
 combinational address path.
+
+### Kernel addresses and weight loading
+
+`weight_loader` generates the shared kernel SRAM read address:
+
+```text
+kernel_raddr = (c_read*R + kernel_r)*S + kernel_s
+```
+
+Every `kernel_bank` instance receives the same address. Instance `k` supplies
+weight `(k,c_read,kernel_r,kernel_s)` from its independent SRAM array; `k` is
+selected by the instance, not encoded in the address. Initial loading uses the
+current tap `(r,s)`. Background loading during RUN uses `(next_r,next_s)` and
+writes the inactive PE weight registers while the current tap computes.
+
+Weights enter the top PE row and shift downward. The loader supplies channel
+coordinates in descending physical-row order, from `ARRAY_SIZE-1` to zero,
+so each weight reaches its corresponding row. Kernel reads are synchronous:
+one PRIME or PREFETCH cycle fetches the first row before shifting begins.
+During each shift, `c_load` identifies the row being loaded, while the SRAM
+read requests the following row:
+
+```text
+c_read = (load_weights && c_load != 0) ? c_load-1 : c_load
+```
+
+The returned data is available for the next clock's weight shift. Reads for
+`c_read >= C` or kernel instances `k >= K` return zero. The loader performs
+`ARRAY_SIZE` shifts even when fewer input channels are active. There is no
+background preload after the final tap.
+
+### Array operation and writeback
 
 PE row `c` consumes input channel `c`; PE column `k` produces output channel
 `k`. Activations move right and partial sums move down. The shared generator
