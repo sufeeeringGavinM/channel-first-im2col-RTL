@@ -53,92 +53,101 @@ must fit the fixed memory capacities. Kernel coordinates use `CFG_WIDTH` bits.
 
 ## Tensor-file and SRAM storage layouts
 
-| Tensor | Tensor-file order | SRAM bank | Within-bank order | SRAM address |
+| Tensor | Tensor-file order | SRAM array | Within-array order | SRAM address |
 |---|---|---|---|---|
-| Input | NCHW | `c` | HWN | `(h*W+w)*N+n` |
-| Kernel | KCRS | `k` | CRS | `(c*R+r)*S+s` |
-| Output | NKPQ | `k` | PQN | `OUT_BASE+(p*Q+q)*N+n` |
+| Input | NCHW | Input array `c` | HWN | `(h*W+w)*N+n` |
+| Kernel | KCRS | Kernel array `k` | CRS | `(c*R+r)*S+s` |
+| Output | NKPQ | Output array `k` | PQN | `(p*Q+q)*N+n` |
 
 In each storage order, the rightmost coordinate varies fastest. Tensor files
 contain hexadecimal values in the logical dimension order. The testbench
-rearranges inputs into the banked SRAM layout and exports outputs in NKPQ order.
-Kernel-file values map to bank `k`, with `(c,r,s)` varying within that bank.
+rearranges inputs into the per-channel SRAM layout and exports outputs in
+NKPQ order.
+Kernel-file values map to kernel array `k`, with `(c,r,s)` varying within
+that array.
 
-Within each input/output bank, images are interleaved with `n` varying fastest.
-For `N=2`, input bank `c` starts with logical `(n,c,h,w)` coordinates
+Within each input or output SRAM array, images are interleaved with `n`
+varying fastest.
+For `N=2`, input SRAM array `c` starts with logical `(n,c,h,w)` coordinates
 `(0,c,0,0)`, `(1,c,0,0)`, `(0,c,0,1)`, `(1,c,0,1)`, and so on.
-Outputs use the same image-minor ordering, starting at `OUT_BASE=N*H*W` after
-the input region. Each SRAM word contains one value.
+Inputs and outputs occupy separate SRAM arrays, each starting at address zero.
+Outputs use the same image-minor ordering. Each SRAM word contains one value.
 
-The physical storage has fixed bank counts and depths. The logical tensor
-shapes are runtime values; they determine which banks and addresses are used.
+The physical storage has fixed array counts and depths. The logical tensor
+shapes are runtime values; they determine which SRAM arrays and addresses
+are used.
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `im2col_addr_gen` | Combinational input-plane address and padding validity from runtime geometry. |
+| `im2col_addr_gen` | Batch/spatial coordinate decoding, input SRAM address, and padding validity. |
 | `MAC` | Registered signed multiply-accumulate with two stationary weight registers. |
-| `MMU` | Shared address generation, channel skew, pass timing, and wiring banks to the PE array. |
-| `channel_bank` | Owns one shared input/output SRAM and selects external or output writes. |
-| `activation_feeder` | Aligns read validity and gates activations for padding and inactive rows. |
-| `output_accumulator` | Output writeback timing, addresses, and accumulation across taps. |
+| `MMU` | Shared address generation, stream position, and wiring SRAM arrays to the PE array. |
+| `channel_bank` | Owns separate input/output SRAMs and connects feeding and accumulation. |
+| `activation_feeder` | Row skew, synchronous-read alignment, and activation gating. |
+| `output_accumulator` | Owns the writeback counter, addresses, and accumulation across taps. |
 | `systolic_array` | PE grid, weight forwarding, and registered column outputs. |
 | `kernel_bank` | One output channel’s kernel SRAM and synchronous read interface. |
 | `weight_loader` | Kernel read addresses and initial/background weight shifting. |
-| `row_sram` | SRAM model with one write port and two synchronous read ports. |
-| `conv_core` | Configuration registers, tap sequencing, start/busy/done, and module wiring. |
+| `row_sram` | Parameterized SRAM model with one write port and one synchronous read port. |
+| `conv_core` | Runtime configuration registers and module wiring. |
+| `conv_controller` | Tap sequencing, pass timing, start/busy/done, and active weight-buffer selection. |
 
 The hardware hierarchy is:
 
 ```text
-conv_core                       Configuration and tap sequencing
+conv_core                       Configuration capture and module wiring
+├── conv_controller             Tap sequencing and run control
 ├── weight_loader               Initial and background weight loading
 ├── kernel_bank × ARRAY_SIZE    Kernel storage
-└── MMU                         Address generation, skew, and pass timing
+└── MMU                         Address generation and stream position
     ├── im2col_addr_gen
     ├── channel_bank × ARRAY_SIZE
     │   ├── activation_feeder
     │   ├── output_accumulator
-    │   └── row_sram             Shared input/output storage
+    │   ├── row_sram             Input storage, BIT_WIDTH bits
+    │   └── row_sram             Output/partial sums, ACC_WIDTH bits
     └── systolic_array
         └── MAC × ARRAY_SIZE²
 ```
 
-Each channel bank owns one memory. Activation feeding and output accumulation
-share its read ports; the bank selects external writes or result writeback.
+Each `channel_bank` instance owns two independent SRAM arrays. External writes
+preload its input SRAM, and the activation feeder reads that SRAM. The output
+accumulator reads and writes the output SRAM. The input channel and output
+channel at a physical lane are enabled independently by `C` and `K`.
 The weight loader owns the descending row counter and prefetch/shift phases.
-The top level owns tap coordinates, run timing, and active weight-buffer selection.
+The convolution controller owns tap coordinates, run timing, and active
+weight-buffer selection. Each activation feeder adds one stage to the shared
+row-skew chain (row zero has no delay), then aligns validity with its SRAM read.
+Each output accumulator owns its writeback counter and output pointer.
 
 ## Address generation and array operation
 
 ### Activation addresses
 
 For tap `(r,s)`, the stream visits all images at each output spatial position.
-The flattened stream position decodes as:
+The MMU advances the stream-position counter and presents the next position
+one cycle ahead of activation feeding for the synchronous SRAM read.
+`im2col_addr_gen` decodes that position and computes the complete input address:
 
 ```text
 n = position % N
 pix = position / N
-```
-
-The spatial address generator then computes:
-
-```text
 p = pix / Q
 q = pix % Q
 h = p*stride_i + r*dilation_i - pad_i
 w = q*stride_j + s*dilation_j - pad_j
-spatial_addr = h*W + w
-sram_addr = spatial_addr*N + n
+sram_addr = (h*W+w)*N+n
 ```
 
-The address generator returns `spatial_addr` within one input plane. The MMU
-converts it to the interleaved SRAM address. `valid` is true when
-`0 <= h < H` and `0 <= w < W`; otherwise the SRAM read address is zero and the feeder supplies
-zero. The caller supplies `pix < P*Q`, `r < R`, and `s < S`; the generator
-checks input bounds. Runtime division and remainder by `Q` are part of the
-combinational address path.
+`n` varies fastest within each spatial output position. The address selects a
+word within the SRAM array for input channel `c`; the channel index selects
+the array, not part of the address. `valid` is true when `0 <= h < H` and
+`0 <= w < W`. For padding positions, the generator returns address zero and
+the activation feeder supplies zero. The caller bounds `position < N*P*Q`,
+`r < R`, and `s < S`; the generator checks input bounds. Runtime division and
+remainder by `N` and `Q` are part of the combinational address path.
 
 ### Kernel addresses and weight loading
 
@@ -173,10 +182,10 @@ background preload after the final tap.
 ### Array operation and writeback
 
 PE row `c` consumes input channel `c`; PE column `k` produces output channel
-`k`. Activations move right and partial sums move down. The shared generator
-prefetches for the one-cycle SRAM read latency; row `c` receives its feed
-bundle delayed by `c` cycles. The bottom physical row supplies registered
-column results. Rows `c >= C` receive zero activations and weights; columns
+`k`. Activations move right and partial sums move down. The MMU
+prefetches for the one-cycle SRAM read latency. Activation feeders form a shared
+chain that delays the feed bundle by `c` cycles for row `c`. The bottom physical
+row supplies registered column results. Rows `c >= C` receive zero activations and weights; columns
 `k >= K` receive zero weights and have writeback disabled. The physical array
 is `ARRAY_SIZE` by `ARRAY_SIZE`. Internal activation, weight, and partial-sum
 connections are unpacked arrays of separate word-sized PE nets. Each column
@@ -196,28 +205,32 @@ zero and assert `clear_pass` during loading. `conv_core` handles these steps int
 
 ## Memory layout and precision
 
-There are `ARRAY_SIZE` input/output SRAM banks and `ARRAY_SIZE` kernel banks:
-`2*ARRAY_SIZE` modeled memories in total. Runtime `C,K` select active channels;
-they do not change the physical bank count. Each PE has two `BIT_WIDTH` stationary weight registers, totaling
-`2*ARRAY_SIZE*ARRAY_SIZE` weight words. These registers are separate from the
-kernel SRAM and the registered weight-forwarding chain.
-These memories are RTL arrays, without instantiated physical SRAM macros.
+There are `ARRAY_SIZE` input SRAM arrays, `ARRAY_SIZE` output SRAM arrays,
+and `ARRAY_SIZE` kernel SRAM arrays: `3*ARRAY_SIZE` modeled memories in total.
+Runtime `C,K` select active channels; they do not change the physical array count.
+Each PE also has two `BIT_WIDTH` stationary weight registers, totaling
+`2*ARRAY_SIZE*ARRAY_SIZE` weight words, separate from kernel SRAM and the
+registered weight-forwarding chain. Memories are RTL arrays without instantiated
+physical SRAM macros. Each input/output SRAM has one write port and one
+synchronous read port.
 
-Input/output SRAM words are `ACC_WIDTH` bits; kernel SRAM words are
-`BIT_WIDTH` bits. Addresses and tensor-file orders are listed in
+| Memory | Word width | Depth per array | Required words per active array |
+|---|---|---|---|
+| Input SRAM | `BIT_WIDTH` | `2**ADDR_WIDTH` | `N*H*W` |
+| Output/partial-sum SRAM | `ACC_WIDTH` | `2**ADDR_WIDTH` | `N*P*Q` |
+| Kernel SRAM | `BIT_WIDTH` | `2**KERNEL_ADDR_WIDTH` | `C*R*S` |
+
+Inputs and outputs each start at address zero in their own memories. The same
+`ADDR_WIDTH` parameter sets both depths; the input and output capacities apply
+independently. Addresses and tensor-file orders are listed in
 [Tensor-file and SRAM storage layouts](#tensor-file-and-sram-storage-layouts).
+Every job uses the kernels preloaded for its configured shape.
 
-Each input/output bank has `2**ADDR_WIDTH` words and must hold `N*(H*W+P*Q)` words.
-Each kernel bank has `2**KERNEL_ADDR_WIDTH` words and must hold `C*R*S` words.
-Output bases follow the configured batch size and input shape. Every job uses the kernels
-preloaded for its configured shape.
-
-Activations and weights are signed `BIT_WIDTH` values. External input
-writes sign-extend into SRAM; activation reads select the low `BIT_WIDTH`
-bits. Products, partial sums, output writes, and cross-tap accumulation use
-`ACC_WIDTH` bits and wrap at that width. Use `ACC_WIDTH >= BIT_WIDTH`.
-The second input/output SRAM read port prefetches stored output values for
-read-modify-write accumulation across taps.
+Activations and weights are signed `BIT_WIDTH` values. Input SRAM stores the
+operand-width bits directly. Products, partial sums, output writes, and
+cross-tap accumulation use `ACC_WIDTH` bits and wrap at that width.
+Use `ACC_WIDTH >= BIT_WIDTH`. The output SRAM read port prefetches the previous
+output value one cycle ahead of read-modify-write accumulation across taps.
 
 ## Running the core
 
@@ -260,7 +273,7 @@ Starts and external input/kernel writes are ignored while busy. Holding
 aborts a run and clears control state while retaining memory contents. Each
 run overwrites outputs on its first tap. Jobs can use different configurations
 without a reset or a new hardware build. `acc_col_out` exposes live pipeline
-results; final results reside in SRAM. The testbench reads SRAM through hierarchy;
+results; final results reside in output SRAM. The testbench reads SRAM through hierarchy;
 the core has no external output readback port.
 
 ## Fixtures and simulation
@@ -313,11 +326,11 @@ The testbench checks every output against its own signed convolution reference.
 | Start-to-done clock cycles | Terminal; excludes reset and external preloading |
 | Useful PE count and percentage | Terminal; `C*K` out of `ARRAY_SIZE*ARRAY_SIZE` |
 | Output tensor in NKPQ order | `sim/output_tensor_core.txt` |
-| Every address in input/output and kernel SRAM banks | `sim/sram_layout.txt` |
+| Every address in input, output, and kernel SRAM arrays | `sim/sram_layout.txt` |
 | Output comparison result | Terminal |
 
 The SRAM report includes hexadecimal values, signed decimal values, tensor
-coordinates, unused locations, and inactive banks. Uninitialized words appear
+coordinates, unused locations, and inactive arrays. Uninitialized words appear
 as `x`. It shows the actual SRAM contents after completion.
 
 Shapes and geometry can be overridden with `+N=`, `+C=`, `+K=`, `+H=`, `+W=`,

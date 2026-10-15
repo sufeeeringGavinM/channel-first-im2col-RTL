@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-// Runtime-configured convolution top level with runtime configuration and tap sequencing.
+// Runtime configuration capture and wiring for the convolution controller and datapath.
 // Images share weights and stream in spatial-position-major, image-minor order.
 // Configuration is captured on start and remains fixed throughout the run.
 module conv_core #(
@@ -15,7 +15,7 @@ module conv_core #(
     input nrst,
     input start,
     output busy,
-    output reg done,
+    output done,
     input [CFG_WIDTH-1:0] cfg_N,
     input [CFG_WIDTH-1:0] cfg_C,
     input [CFG_WIDTH-1:0] cfg_H,
@@ -40,36 +40,24 @@ module conv_core #(
     input [ARRAY_SIZE-1:0][BIT_WIDTH-1:0] kernel_wdata_ext,
     output [ARRAY_SIZE-1:0][ACC_WIDTH-1:0] acc_col_out
 );
-  localparam IDLE = 3'd0, PRIME = 3'd1, LOAD_WEIGHTS = 3'd2, RUN = 3'd3, SWITCH_TAP = 3'd4;
-  reg [2:0] state;
-  reg active_weight_buffer;
-  reg [CFG_WIDTH:0] run_count;
-  reg [CFG_WIDTH-1:0] r, s;
   reg [CFG_WIDTH-1:0] N, C, H, W, K, R, S, P, Q, pad_i, pad_j, stride_i, stride_j, dilation_i, dilation_j;
-  wire [CFG_WIDTH:0] run_cycles = (CFG_WIDTH+1)'(N) * P * Q + 2*ARRAY_SIZE;
-  assign busy = state != IDLE;
-  wire clear_pass = !nrst || state != RUN;
-  wire has_next_tap = r != R-1 || s != S-1;
-  wire [CFG_WIDTH-1:0] next_r = s == S-1 ? r + 1'b1 : r;
-  wire [CFG_WIDTH-1:0] next_s = s == S-1 ? {CFG_WIDTH{1'b0}} : s + 1'b1;
-  wire preload_next = state == RUN && has_next_tap;
+  wire [CFG_WIDTH-1:0] r, s, next_r, next_s;
+  wire clear_pass, prime, initial_load, running, preload_next, restart_weights;
+  wire accumulate, active_weight_buffer;
   wire load_weights, weight_write_buffer;
-  wire accumulate = r != 0 || s != 0;
   wire [ARRAY_SIZE-1:0] input_we = sram_we_ext & {ARRAY_SIZE{nrst && !busy}};
 
   wire initial_done, kernel_read_enable;
   wire [CFG_WIDTH-1:0] c_read;
   wire [KERNEL_ADDR_WIDTH-1:0] kernel_raddr;
   wire [ARRAY_SIZE-1:0][BIT_WIDTH-1:0] kernel_rdata, weight_row_in;
-  wire restart_weights = (state == IDLE && start) ||
-                         (state == RUN && run_count == run_cycles-1 && has_next_tap);
   weight_loader #(
       .ARRAY_SIZE(ARRAY_SIZE), .BIT_WIDTH(BIT_WIDTH),
       .ADDR_WIDTH(KERNEL_ADDR_WIDTH), .CFG_WIDTH(CFG_WIDTH)
   ) u_weight_loader (
-      .clk(clk), .nrst(nrst), .restart(restart_weights), .prime(state == PRIME),
-      .initial_load(state == LOAD_WEIGHTS), .preload_next(preload_next),
-      .running(state == RUN), .active_weight_buffer(active_weight_buffer),
+      .clk(clk), .nrst(nrst), .restart(restart_weights), .prime(prime),
+      .initial_load(initial_load), .preload_next(preload_next),
+      .running(running), .active_weight_buffer(active_weight_buffer),
       .R(R), .S(S), .r(r), .s(s), .next_r(next_r), .next_s(next_s),
       .kernel_rdata(kernel_rdata), .load_weights(load_weights),
       .weight_write_buffer(weight_write_buffer), .initial_done(initial_done),
@@ -91,13 +79,6 @@ module conv_core #(
 
   always @(posedge clk) begin
     if (!nrst) begin
-      state <= IDLE;
-      done <= 0;
-      active_weight_buffer <= 0;
-
-      r <= 0; s <= 0;
-
-      run_count <= 0;
       N <= 1;
       C <= 0;
       H <= 0;
@@ -113,66 +94,33 @@ module conv_core #(
       stride_j <= 0;
       dilation_i <= 0;
       dilation_j <= 0;
-    end else begin
-      done <= 0;
-      case (state)
-        IDLE: if (start) begin
-          active_weight_buffer <= 0;
-
-          N <= cfg_N;
-          C <= cfg_C;
-          H <= cfg_H;
-          W <= cfg_W;
-          K <= cfg_K;
-          R <= cfg_R;
-          S <= cfg_S;
-          P <= cfg_P;
-          Q <= cfg_Q;
-          pad_i <= cfg_pad_i;
-          pad_j <= cfg_pad_j;
-          stride_i <= cfg_stride_i;
-          stride_j <= cfg_stride_j;
-          dilation_i <= cfg_dilation_i;
-          dilation_j <= cfg_dilation_j;
-          r <= 0; s <= 0;
-
-          run_count <= 0;
-          state <= PRIME;
-        end
-        PRIME: state <= LOAD_WEIGHTS;
-        LOAD_WEIGHTS: begin
-          if (initial_done) begin
-            run_count <= 0;
-
-            state <= RUN;
-          end
-        end
-        SWITCH_TAP: begin
-          // One cleared cycle resets the stream and prefetches pixel zero for the new tap.
-          run_count <= 0;
-          state <= RUN;
-        end
-        RUN: begin
-          if (run_count == run_cycles-1) begin
-            // Every logical output is committed before changing tap.
-            run_count <= 0;
-            if (s == S-1 && r == R-1) begin
-              state <= IDLE;
-              done <= 1;
-            end else begin
-              // The next weights are ready before the current physical array finishes draining.
-              r <= next_r;
-              s <= next_s;
-              active_weight_buffer <= !active_weight_buffer;
-
-              state <= SWITCH_TAP;
-            end
-          end else run_count <= run_count + 1'b1;
-        end
-        default: state <= IDLE;
-      endcase
+    end else if (start && !busy) begin
+      N <= cfg_N;
+      C <= cfg_C;
+      H <= cfg_H;
+      W <= cfg_W;
+      K <= cfg_K;
+      R <= cfg_R;
+      S <= cfg_S;
+      P <= cfg_P;
+      Q <= cfg_Q;
+      pad_i <= cfg_pad_i;
+      pad_j <= cfg_pad_j;
+      stride_i <= cfg_stride_i;
+      stride_j <= cfg_stride_j;
+      dilation_i <= cfg_dilation_i;
+      dilation_j <= cfg_dilation_j;
     end
   end
+
+  conv_controller #(.ARRAY_SIZE(ARRAY_SIZE), .CFG_WIDTH(CFG_WIDTH)) u_controller (
+      .clk(clk), .nrst(nrst), .start(start), .initial_done(initial_done),
+      .N(N), .P(P), .Q(Q), .R(R), .S(S), .busy(busy), .done(done),
+      .clear_pass(clear_pass), .prime(prime), .initial_load(initial_load),
+      .running(running), .preload_next(preload_next), .restart_weights(restart_weights),
+      .accumulate(accumulate), .active_weight_buffer(active_weight_buffer),
+      .r(r), .s(s), .next_r(next_r), .next_s(next_s)
+  );
 
   MMU #(
       .ARRAY_SIZE(ARRAY_SIZE), .BIT_WIDTH(BIT_WIDTH), .ACC_WIDTH(ACC_WIDTH),

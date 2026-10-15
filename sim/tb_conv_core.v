@@ -24,7 +24,6 @@ module tb_conv_core;
 
   integer P;
   integer Q;
-  integer OUT_BASE;
   localparam SRAM_DEPTH = 1 << ADDR_WIDTH;
   parameter KERNEL_ADDR_WIDTH = 8;
 
@@ -75,14 +74,16 @@ module tb_conv_core;
       .sram_wdata_ext(sram_wdata_ext), .acc_col_out(acc_col_out)
   );
 
-  // Fixed memory views allow runtime address and bank selection in the checks.
-  wire [ACC_WIDTH-1:0] sram_dump [0:ARRAY_SIZE-1][0:SRAM_DEPTH-1];
+  // Fixed memory views allow runtime channel and address selection in the checks.
+  wire [BIT_WIDTH-1:0] input_dump [0:ARRAY_SIZE-1][0:SRAM_DEPTH-1];
+  wire [ACC_WIDTH-1:0] output_dump [0:ARRAY_SIZE-1][0:SRAM_DEPTH-1];
   wire [BIT_WIDTH-1:0] kernel_dump [0:ARRAY_SIZE-1][0:(1<<KERNEL_ADDR_WIDTH)-1];
   genvar bank, address;
   generate
     for (bank = 0; bank < ARRAY_SIZE; bank = bank + 1) begin : g_dump
       for (address = 0; address < SRAM_DEPTH; address = address + 1) begin : g_sram
-        assign sram_dump[bank][address] = UUT.u_mmu.g_c[bank].u_bank.u_sram.mem[address];
+        assign input_dump[bank][address] = UUT.u_mmu.g_c[bank].u_bank.u_input_sram.mem[address];
+        assign output_dump[bank][address] = UUT.u_mmu.g_c[bank].u_bank.u_output_sram.mem[address];
       end
       for (address = 0; address < (1<<KERNEL_ADDR_WIDTH); address = address + 1) begin : g_kernel
         assign kernel_dump[bank][address] = UUT.g_kernel[bank].u_bank.mem[address];
@@ -166,28 +167,30 @@ module tb_conv_core;
       $fdisplay(fd, "ARRAY_SIZE=%0d N=%0d C=%0d K=%0d H=%0d W=%0d R=%0d S=%0d P=%0d Q=%0d",
                 ARRAY_SIZE, N, C, K, H, W, R, S, P, Q);
       $fdisplay(fd, "Addresses are decimal; values are two's-complement hex with signed decimal. x means uninitialized.");
-      $fdisplay(fd, "Input/output SRAM: %0d banks, %0d words per bank, %0d bits per word", ARRAY_SIZE, SRAM_DEPTH, ACC_WIDTH);
+      $fdisplay(fd, "Input SRAM: %0d arrays, %0d words per array, %0d bits per word", ARRAY_SIZE, SRAM_DEPTH, BIT_WIDTH);
       for (b = 0; b < ARRAY_SIZE; b = b + 1) begin
-        $fdisplay(fd, "\nInput/output SRAM bank %0d:", b);
-        for (address = 0; address < SRAM_DEPTH; address = address + 1) begin
-          if (address < OUT_BASE && b < C)
+        $fdisplay(fd, "\nInput SRAM array %0d:", b);
+        for (address = 0; address < SRAM_DEPTH; address = address + 1)
+          if (b < C && address < N*H*W)
             $fdisplay(fd, "  addr %0d = %h (%0d)  input[n=%0d,c=%0d,h=%0d,w=%0d]",
-                      address, sram_dump[b][address], $signed(sram_dump[b][address]), address%N, b, address/(N*W), (address/N)%W);
-          else if (address < OUT_BASE)
-            $fdisplay(fd, "  addr %0d = %h (%0d)  unused input region", address, sram_dump[b][address], $signed(sram_dump[b][address]));
-          else if (address < OUT_BASE+N*P*Q && b < K)
-            $fdisplay(fd, "  addr %0d = %h (%0d)  output[n=%0d,k=%0d,p=%0d,q=%0d]",
-                      address, sram_dump[b][address], $signed(sram_dump[b][address]), (address-OUT_BASE)%N, b, (address-OUT_BASE)/(N*Q), ((address-OUT_BASE)/N)%Q);
-          else if (address < OUT_BASE+N*P*Q)
-            $fdisplay(fd, "  addr %0d = %h (%0d)  unused output region", address, sram_dump[b][address], $signed(sram_dump[b][address]));
+                      address, input_dump[b][address], $signed(input_dump[b][address]), address%N, b, address/(N*W), (address/N)%W);
           else
-            $fdisplay(fd, "  addr %0d = %h (%0d)  unused region", address, sram_dump[b][address], $signed(sram_dump[b][address]));
-        end
+            $fdisplay(fd, "  addr %0d = %h (%0d)  unused input region", address, input_dump[b][address], $signed(input_dump[b][address]));
       end
-      $fdisplay(fd, "\nKernel SRAM: %0d banks, %0d words per bank, %0d bits per word",
+      $fdisplay(fd, "\nOutput SRAM: %0d arrays, %0d words per array, %0d bits per word", ARRAY_SIZE, SRAM_DEPTH, ACC_WIDTH);
+      for (b = 0; b < ARRAY_SIZE; b = b + 1) begin
+        $fdisplay(fd, "\nOutput SRAM array %0d:", b);
+        for (address = 0; address < SRAM_DEPTH; address = address + 1)
+          if (b < K && address < N*P*Q)
+            $fdisplay(fd, "  addr %0d = %h (%0d)  output[n=%0d,k=%0d,p=%0d,q=%0d]",
+                      address, output_dump[b][address], $signed(output_dump[b][address]), address%N, b, address/(N*Q), (address/N)%Q);
+          else
+            $fdisplay(fd, "  addr %0d = %h (%0d)  unused output region", address, output_dump[b][address], $signed(output_dump[b][address]));
+      end
+      $fdisplay(fd, "\nKernel SRAM: %0d arrays, %0d words per array, %0d bits per word",
                 ARRAY_SIZE, 1<<KERNEL_ADDR_WIDTH, BIT_WIDTH);
       for (b = 0; b < ARRAY_SIZE; b = b + 1) begin
-        $fdisplay(fd, "\nKernel SRAM bank %0d:", b);
+        $fdisplay(fd, "\nKernel SRAM array %0d:", b);
         for (address = 0; address < (1<<KERNEL_ADDR_WIDTH); address = address + 1)
           if (b < K && address < C*R*S)
             $fdisplay(fd, "  addr %0d = %h (%0d)  kernel[k=%0d,c=%0d,r=%0d,s=%0d]",
@@ -210,16 +213,21 @@ module tb_conv_core;
           for (p = 0; p < P; p = p + 1) begin
             for (q = 0; q < Q; q = q + 1) begin
               expected_word = expected[((n*K+k)*P+p)*Q+q];
-              if (sram_dump[k][OUT_BASE+(p*Q+q)*N+n] !== expected_word) begin
+              if (output_dump[k][(p*Q+q)*N+n] !== expected_word) begin
                 $display("FAIL (n,k,p,q)=(%0d,%0d,%0d,%0d): expected=%h actual=%h",
-                         n, k, p, q, expected_word, sram_dump[k][OUT_BASE+(p*Q+q)*N+n]);
+                         n, k, p, q, expected_word, output_dump[k][(p*Q+q)*N+n]);
                 errors = errors + 1;
               end
-              $fwrite(fd, "%h ", sram_dump[k][OUT_BASE+(p*Q+q)*N+n]);
+              $fwrite(fd, "%h ", output_dump[k][(p*Q+q)*N+n]);
             end
             $fwrite(fd, "\n");
           end
       $fclose(fd);
+      for (c = 0; c < C; c = c + 1)
+        for (a = 0; a < H*W; a = a + 1)
+          for (n = 0; n < N; n = n + 1)
+            if (input_dump[c][a*N+n] !== input_tensor[(n*C+c)*H*W+a])
+              $fatal(1, "Input SRAM changed during convolution");
       if (errors) $fatal(1, "%0d convolution outputs failed", errors);
       $display("PASS: %0d convolution outputs matched; written to %s", N*K*P*Q, output_file);
     end
@@ -251,7 +259,6 @@ module tb_conv_core;
     if ($value$plusargs("dilation_j=%d", dilation_j)) begin end
     P = (H + 2*pad_i - dilation_i*(R-1) - 1) / stride_i + 1;
     Q = (W + 2*pad_j - dilation_j*(S-1) - 1) / stride_j + 1;
-    OUT_BASE = N*H*W;
     $readmemh(input_file, input_tensor, 0, N*C*H*W-1);
     $readmemh(kernel_file, kernel_tensor, 0, K*C*R*S-1);
     build_reference;

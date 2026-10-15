@@ -32,7 +32,7 @@ def fits(c, limits):
     array, words, kernel_words = limits
     P, Q = output_shape(c)
     return (P > 0 and Q > 0 and c['C'] <= array and c['K'] <= array
-            and c['N']*(c['H']*c['W'] + P*Q) <= words
+            and c['N']*c['H']*c['W'] <= words and c['N']*P*Q <= words
             and c['C']*c['R']*c['S'] <= kernel_words)
 
 
@@ -48,6 +48,9 @@ def make_cases(count, seed, random_only=False):
         (4,1,1,1,1,1,1,0,0,1,1,1,1),
         (1,1,1,1,1,3,3,1,1,1,1,1,1),
         (1,1,8,16,2,1,1,0,0,1,1,1,1),
+        # Input and output arrays can each use their entire capacity.
+        (2,2,8,16,3,1,1,0,0,1,1,1,1),
+        (1,1,1,1,2,2,2,8,8,1,1,1,1),
         (1,4,8,8,2,8,8,0,0,1,1,1,1),
         (1,10,8,8,10,5,5,0,0,1,1,1,1),
         (1,1,6,7,10,2,3,1,2,2,3,2,1),

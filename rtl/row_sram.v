@@ -1,5 +1,4 @@
-// SRAM model with one write port and two synchronous read ports.
-// Read port 1 supplies activations; port 2 supplies stored outputs for tap accumulation.
+// SRAM model with one write port and one synchronous read port.
 
 
 `timescale 1ns / 1ps
@@ -13,10 +12,8 @@ module row_sram #(
     input [ADDR_WIDTH-1:0] waddr,
     input [ DATA_WIDTH-1:0] wdata,
     input [ADDR_WIDTH-1:0] raddr,
-    input [ADDR_WIDTH-1:0] raddr2,
 
-    output reg [DATA_WIDTH-1:0] rdata,
-    output reg [DATA_WIDTH-1:0] rdata2
+    output reg [DATA_WIDTH-1:0] rdata
 );
   localparam DEPTH = 1 << ADDR_WIDTH;
 
@@ -25,7 +22,6 @@ module row_sram #(
   always @(posedge clk) begin
     if (we) mem[waddr] <= wdata;
     rdata <= mem[raddr];
-    rdata2 <= mem[raddr2];
   end
 
 endmodule
